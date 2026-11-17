@@ -1,6 +1,6 @@
 #!/bin/zsh
 # claude-acc: switch Claude Code between saved accounts on macOS without logging in again.
-# https://github.com/tdvietdev/claude-acc (MIT)
+# https://github.com/tdvietdev/claude-multi-accounts (MIT)
 #
 # claude-acc             : list saved accounts with email and current usage
 # claude-acc save <name> : store the currently logged-in account in slot <name>

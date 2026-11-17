@@ -1,6 +1,6 @@
-# claude-acc
+# claude-multi-accounts
 
-Switch [Claude Code](https://claude.com/claude-code) between several Claude accounts on macOS without logging in again, and see each account's usage before you pick one.
+Switch [Claude Code](https://claude.com/claude-code) between several Claude accounts on macOS without logging in again, and see each account's usage before you pick one. It is a single shell script, installed as the `claude-acc` command.
 
 ```
 $ claude-acc
@@ -24,7 +24,7 @@ You log in to each account once. After that, switching is one command, and a Cla
 
 ```sh
 mkdir -p ~/bin
-curl -fsSL https://raw.githubusercontent.com/tdvietdev/claude-acc/main/claude-acc -o ~/bin/claude-acc
+curl -fsSL https://raw.githubusercontent.com/tdvietdev/claude-multi-accounts/main/claude-acc -o ~/bin/claude-acc
 chmod +x ~/bin/claude-acc
 ```
 
