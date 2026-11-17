@@ -1,0 +1,134 @@
+#!/bin/zsh
+# claude-acc: switch Claude Code between saved accounts on macOS without logging in again.
+# https://github.com/tdvietdev/claude-acc (MIT)
+#
+# claude-acc             : list saved accounts with email and current usage
+# claude-acc save <name> : store the currently logged-in account in slot <name>
+# claude-acc use <name>  : switch to account <name>, then show its usage
+# claude-acc sync        : make the account shown by Claude Code match the active login
+[[ $OSTYPE == darwin* ]] || { echo "claude-acc only supports macOS (Keychain)"; exit 1; }
+for dep in jq curl security; do
+  command -v $dep >/dev/null || { echo "Missing dependency: $dep (brew install $dep)"; exit 1; }
+done
+SVC="Claude Code-credentials"
+STATE=~/.claude-accounts; mkdir -p $STATE; chmod 700 $STATE
+API=https://api.anthropic.com/api/oauth
+TOKEN_URL=https://platform.claude.com/v1/oauth/token
+CLIENT_ID=9d1c250a-e61b-44d9-88ed-5944d1962f5e
+
+cur()          { cat $STATE/current 2>/dev/null || true; }
+slots()        { security dump-keychain 2>/dev/null | grep -o '"claude-acc-[^"]*"' | tr -d '"' | sed 's/claude-acc-//' | sort -u; }
+active_creds() { security find-generic-password -s "$SVC" -a "$USER" -w; }
+slot_creds()   { security find-generic-password -s "claude-acc-$1" -a "$USER" -w 2>/dev/null; }
+put_slot()     { security add-generic-password -U -s "claude-acc-$1" -a "$USER" -w "$2"; }
+
+# GET an OAuth API path with the access token from creds JSON ($1)
+api_get() {
+  local tok; tok=$(jq -r '.claudeAiOauth.accessToken' <<< "$1")
+  curl -sf -H @<(printf 'Authorization: Bearer %s\nanthropic-beta: oauth-2025-04-20\n' "$tok") "$API/$2"
+}
+email_of() { api_get "$1" profile | jq -r '.account.email_address // .account.email // empty'; }
+
+# Print valid creds for a saved (inactive) slot, refreshing and re-saving it if the access token expired
+fresh_slot() {
+  local c r now exp
+  c=$(slot_creds $1) || return 1
+  now=$(( $(date +%s) * 1000 ))
+  exp=$(jq -r '.claudeAiOauth.expiresAt // 0' <<< "$c")
+  if (( exp - 300000 > now )); then print -r -- "$c"; return 0; fi
+  r=$(jq --arg cid $CLIENT_ID '{grant_type:"refresh_token", refresh_token:.claudeAiOauth.refreshToken,
+        client_id:$cid, scope:(.claudeAiOauth.scopes // [] | join(" "))}' <<< "$c" \
+      | curl -sf -X POST -H 'Content-Type: application/json' --data @- $TOKEN_URL) || return 1
+  [ -n "$(jq -r '.access_token // empty' <<< "$r")" ] || return 1
+  c=$(jq -s --argjson now $now '.[0] as $c | .[1] as $r | $c
+        | .claudeAiOauth.accessToken = $r.access_token
+        | .claudeAiOauth.refreshToken = ($r.refresh_token // $c.claudeAiOauth.refreshToken)
+        | .claudeAiOauth.expiresAt = ($now + ($r.expires_in // 28800) * 1000)' \
+      <(print -r -- "$c") <(print -r -- "$r")) || return 1
+  put_slot $1 "$c"
+  print -r -- "$c"
+}
+
+# Update the account info Claude Code displays (oauthAccount in ~/.claude.json) to match creds ($1)
+sync_display() {
+  local cfg=~/.claude.json p mode tmp
+  [ -f $cfg ] || return 0
+  p=$(api_get "$1" profile) || { echo "(could not update displayed account)"; return 0; }
+  [ -f $STATE/claude.json.bak ] || cp -p $cfg $STATE/claude.json.bak
+  mode=$(stat -f %Lp $cfg); tmp=$cfg.claude-acc.$$
+  jq --argjson p "$p" --argjson now $(( $(date +%s) * 1000 )) '.oauthAccount += {
+      accountUuid: $p.account.uuid, emailAddress: $p.account.email,
+      displayName: $p.account.display_name, fullName: $p.account.full_name,
+      accountCreatedAt: $p.account.created_at,
+      organizationUuid: $p.organization.uuid, organizationName: $p.organization.name,
+      organizationType: $p.organization.organization_type, billingType: $p.organization.billing_type,
+      organizationRateLimitTier: $p.organization.rate_limit_tier, seatTier: $p.organization.seat_tier,
+      hasExtraUsageEnabled: $p.organization.has_extra_usage_enabled,
+      subscriptionCreatedAt: $p.organization.subscription_created_at,
+      ccOnboardingFlags: $p.organization.cc_onboarding_flags,
+      claudeCodeTrialEndsAt: $p.organization.claude_code_trial_ends_at,
+      claudeCodeTrialDurationDays: $p.organization.claude_code_trial_duration_days,
+      profileFetchedAt: $now }' $cfg > $tmp && chmod $mode $tmp && mv $tmp $cfg || rm -f $tmp
+}
+
+creds_for() { if [ "$1" = "$(cur)" ]; then active_creds; else fresh_slot $1; fi; }
+
+usage_line() {
+  api_get "$1" usage | jq -r '
+    def t: if . then sub("(\\.[0-9]+)?(\\+00:00|Z)$"; "") | strptime("%Y-%m-%dT%H:%M:%S") | mktime | strflocaltime("%d/%m %H:%M") else "-" end;
+    def u: if . then "\(.utilization | floor)% (reset \(.resets_at | t))" else "-" end;
+    "5h: \(.five_hour | u)   week: \(.seven_day | u)"' 2>/dev/null || echo "usage unavailable"
+}
+
+show_one() { # $1 slot name
+  local mark=" " creds em
+  [ "$1" = "$(cur)" ] && mark="*"
+  if ! creds=$(creds_for $1); then
+    printf '%s %-12s token expired: /login this account, then claude-acc save %s\n' "$mark" $1 $1; return
+  fi
+  em=$(email_of "$creds")
+  [ -n "$em" ] && echo $em > $STATE/$1.email
+  printf '%s %-12s %-32s %s\n' "$mark" $1 "${em:-?}" "$(usage_line "$creds")"
+}
+
+save() {
+  local c; c=$(active_creds) || { echo "Not logged in"; exit 1; }
+  put_slot $1 "$c"
+  echo $1 > $STATE/current
+  local em; em=$(email_of "$c"); [ -n "$em" ] && echo $em > $STATE/$1.email
+}
+
+case $1 in
+  save)
+    [ -n "$2" ] || { echo "Usage: claude-acc save <name>"; exit 1; }
+    save $2; echo "Saved: $2"; show_one $2 ;;
+  use)
+    [ -n "$2" ] || { echo "Usage: claude-acc use <name>"; exit 1; }
+    slot_creds $2 >/dev/null || { echo "No saved account named $2"; exit 1; }
+    [ "$(cur)" = "$2" ] && { echo "Already using $2"; show_one $2; exit 0; }
+    if [ -n "$(cur)" ]; then
+      # guard: do not overwrite a slot with a different account's login (e.g. after a manual /login)
+      ae=$(email_of "$(active_creds)"); se=$(cat $STATE/$(cur).email 2>/dev/null)
+      if [ -n "$ae" ] && [ -n "$se" ] && [ "$ae" != "$se" ]; then
+        echo "Active login is $ae, but slot $(cur) is $se."
+        echo "Save it first: claude-acc save <name>"; exit 1
+      fi
+      save "$(cur)"   # re-save the latest token of the current account
+    fi
+    c=$(fresh_slot $2) || { echo "Token for $2 expired: /login that account, then claude-acc save $2"; exit 1; }
+    security add-generic-password -U -s "$SVC" -a "$USER" -w "$c"
+    echo $2 > $STATE/current; sync_display "$c"
+    echo "Switched to $2 (reload the VSCode window to refresh the account shown there)"; show_one $2 ;;
+  sync)   # fix the displayed account to match the active login
+    sync_display "$(active_creds)"; echo "Displayed account: $(jq -r '.oauthAccount.emailAddress' ~/.claude.json)" ;;
+  ""|list)
+    for n in $(slots); do show_one $n; done ;;
+  *) cat <<'EOF'
+Usage:
+  claude-acc               list saved accounts with email and usage (* = active)
+  claude-acc save <name>   save the currently logged-in account as <name>
+  claude-acc use <name>    switch to <name> and show its usage
+  claude-acc sync          fix the account shown by Claude Code to match the active login
+EOF
+     [[ $1 == help || $1 == -h || $1 == --help ]] || exit 1 ;;
+esac
