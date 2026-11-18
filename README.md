@@ -66,11 +66,11 @@ The first message after a switch resends the whole conversation to the new accou
 - Claude Code stores its OAuth login in the Keychain item `Claude Code-credentials`. `save` copies that item to `claude-acc-<name>`, and `use` copies a saved one back.
 - Before switching away, `use` saves the active login back into its slot, because Claude Code refreshes tokens while you work and the saved copy would otherwise go stale.
 - If the active login does not belong to the slot `claude-acc` thinks is active (e.g. you ran `/login` by hand and did not `save`), `use` stops instead of overwriting that slot.
-- Saved access tokens expire after a few hours. When a saved one has expired, `claude-acc` refreshes it the same way Claude Code does and stores the new token in the slot.
+- Saved access tokens expire after a few hours, but the refresh token lasts for weeks. When a saved access token has expired, `claude-acc` lets Claude Code refresh it: it loads the login into a throwaway config dir (`CLAUDE_CONFIG_DIR`), runs `claude auth status` (no chat, no usage), stores the refreshed login back in the slot, and deletes the throwaway dir and its Keychain item. If that fails, `use` still switches, and Claude Code refreshes the token on the next request. Only when the refresh token itself has expired (about 4 weeks after login) do you need to `/login` and `save` again.
 - Usage comes from the same endpoint Claude Code's `/usage` uses.
 - `use` also updates the account details in `~/.claude.json` so Claude Code shows the right email. The first time it does this it keeps a backup at `~/.claude-accounts/claude.json.bak`.
 
-State lives in the Keychain (`claude-acc-*` items) and `~/.claude-accounts/` (active slot name and each slot's email). Tokens are never written to disk or printed.
+State lives in the Keychain (`claude-acc-*` items) and `~/.claude-accounts/` (active slot name and each slot's email and profile). Tokens are never written to disk or printed.
 
 ## Limitations
 
